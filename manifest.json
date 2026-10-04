@@ -1,0 +1,25 @@
+{
+    "name": "E-Invoice",
+    "description": "Issues electronic invoices (hoa don dien tu) when an order completes. Country legal requirements are encapsulated behind a pluggable profile strategy, with a Vietnam profile aligned to Nghinh dinh 254/2026/ND-CP and Thong tu 91/2026/TT-BTC. Invoices are viewable from the customer email, the My Account order detail page, and a REST endpoint.",
+    "version": "1.0.0",
+    "author": "Puleeno Nguyen",
+    "extension_id": "e-invoice",
+    "caller": {
+        "file": "EInvoiceExtension.php",
+        "class": "Jankx\\Extensions\\EInvoice\\EInvoiceExtension"
+    },
+    "requirements": {
+        "php": ">=7.4"
+    },
+    "dependencies": [
+        "base-ecommerce"
+    ],
+    "context": [
+        "frontend",
+        "admin",
+        "ajax",
+        "rest"
+    ],
+    "auto_activate": true,
+    "settings_url": "admin.php?page=jankx-ecommerce-general&tab=e-invoice"
+}
