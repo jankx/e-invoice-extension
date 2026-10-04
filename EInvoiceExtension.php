@@ -1,279 +1,303 @@
 <?php
 namespace Jankx\Extensions\EInvoice;
 
-use Jankx\Extensions\EInvoice\Admin\InvoiceListPage;
-use Jankx\Extensions\EInvoice\Admin\InvoiceSettingsPage;
-use Jankx\Extensions\EInvoice\Model\InvoiceDatabaseInstaller;
-use Jankx\Extensions\EInvoice\Numbering\YearlySequenceNumberGenerator;
-use Jankx\Extensions\EInvoice\Profile\Countries\GenericInvoiceProfile;
-use Jankx\Extensions\EInvoice\Profile\Countries\VietnamInvoiceProfile;
-use Jankx\Extensions\EInvoice\Profile\InvoiceProfileRegistry;
-use Jankx\Extensions\EInvoice\Repository\InvoiceRepositoryInterface;
-use Jankx\Extensions\EInvoice\Repository\WordPressInvoiceRepository;
-use Jankx\Extensions\EInvoice\Snapshot\BuyerIdentityResolver;
-use Jankx\Extensions\EInvoice\Snapshot\OrderSnapshotFactory;
-use Jankx\Extensions\EInvoice\Snapshot\SellerIdentityResolver;
+use Jankx\Extensions\AbstractExtension;
 
 /**
  * Entry point referenced by manifest.json.
  *
- * Everything here is deliberately lazy: object graphs are built on demand and
- * only the hooks an extension actually needs are registered, so an inactive
- * invoice system costs nothing on the storefront.
+ * Note on the framework contract: ThemeExtensionManager instantiates the caller
+ * with `new $class()` (no arguments) at `after_setup_theme` priority 15, then
+ * calls `activate()`, which calls `register_hooks()` exactly once. Two
+ * consequences shape this class:
+ *
+ *   1. There is no `boot()` entry point — `init()` and `register_hooks()` are
+ *      the contract (see Jankx\Extensions\AbstractExtension).
+ *   2. `register_hooks()` runs *before* `init`, so hooks must be registered
+ *      there directly. Deferring them onto `init` from inside
+ *      `register_hooks()` would work today but breaks if an extension is ever
+ *      loaded later.
  *
  * @package Jankx\Extensions\EInvoice
  */
-class EInvoiceExtension
+class EInvoiceExtension extends AbstractExtension
 {
-    /** @var self|null */
     protected static $instance;
 
-    /** @var InvoiceProfileRegistry|null */
-    protected $profiles;
-
-    /** @var InvoiceRepositoryInterface|null */
-    protected $repository;
-
-    /** @var \Jankx\Extensions\EInvoice\Service\InvoiceDocumentService|null */
-    protected $documents;
-
-    /** @var \Jankx\Extensions\EInvoice\Service\InvoiceIssuanceService|null */
-    protected $issuance;
-
-    /** @var \Jankx\Extensions\EInvoice\Mail\InvoiceMailer|null */
-    protected $mailer;
-
-    public static function instance(): self
+    public function __construct()
     {
-        if (self::$instance === null) {
-            self::$instance = new self();
-        }
+        $this->registerAutoloader();
 
-        return self::$instance;
-    }
-
-    public static function reset(): void
-    {
-        self::$instance = null;
+        parent::__construct();
     }
 
     /**
-     * @param string $file Absolute path to this file.
+     * PSR-4 autoloading for this extension only. The theme has no Composer
+     * autoloader for extension namespaces, so extensions self-register.
      */
-    public function boot(string $file): void
+    protected function registerAutoloader(): void
     {
-        if (!class_exists('Jankx\\Extensions\\BaseEcommerce\\Order\\Order')) {
-            add_action('admin_notices', function (): void {
-                if (current_user_can('activate_plugins')) {
-                    echo '<div class="notice notice-error"><p>'
-                        . esc_html__(
-                            'E-Invoice yêu cầu extension Ecommerce (base-ecommerce) được kích hoạt.',
-                            'e-invoice'
-                        )
-                        . '</p></div>';
-                }
-            });
+        spl_autoload_register(static function ($class): void {
+            $prefix = 'Jankx\\Extensions\\EInvoice\\';
+            $base   = __DIR__ . '/src/';
+            $length = strlen($prefix);
+
+            if (strncmp($prefix, $class, $length) !== 0) {
+                return;
+            }
+
+            $relative = substr($class, $length);
+            $file     = $base . str_replace('\\', '/', $relative) . '.php';
+
+            if (is_readable($file)) {
+                require_once $file;
+            }
+        });
+    }
+
+    public static function get_instance(): ?self
+    {
+        return self::$instance;
+    }
+
+    // ── Framework lifecycle ──────────────────────────────────────────────────
+
+    public function init(): void
+    {
+        self::$instance = $this;
+
+        if (!self::dependenciesMet()) {
+            add_action('admin_notices', [$this, 'renderDependencyNotice']);
 
             return;
         }
 
-        register_activation_hook($file, [$this, 'activate']);
-        register_deactivation_hook($file, [$this, 'deactivate']);
-
-        (new InvoiceDatabaseInstaller())->register();
+        // Priority 5 so the tables exist before anything reads or writes them.
+        (new Model\InvoiceDatabaseInstaller())->register();
 
         add_action('init', [$this, 'loadTextdomain'], 1);
-        add_action('init', [$this, 'registerHooks'], 10);
 
-        add_action('jankx/extensions/e-invoice/services', [$this, 'exposeServices']);
-        add_filter('jankx/extensions/active', [$this, 'reportActive']);
+        // The active profile is resolved once and memoised; changing the country
+        // setting has to invalidate that cache or the old profile sticks for
+        // the rest of the request.
+        add_action('update_option_jankx_einvoice_country', [$this, 'flushProfiles']);
+        add_action('add_option_jankx_einvoice_country', [$this, 'flushProfiles']);
+    }
+
+    public function register_hooks(): void
+    {
+        if (!self::dependenciesMet()) {
+            return;
+        }
+
+        (new Listener\InvoiceOnOrderStatusListener($this->issuance()))->register();
+        (new Account\InvoiceAccountPanel($this->repository()))->register();
+        (new Rest\InvoiceRestController($this->repository(), $this->documents()))->register();
+
+        // These are registered unconditionally: their own hooks (admin_menu,
+        // admin_init, the ecommerce settings filters) simply never fire in the
+        // contexts where they are irrelevant. Gating on is_admin() here would be
+        // wrong, because REST and admin-ajax requests also load the extension.
+        (new Admin\InvoiceSettingsPage(
+            $this->profiles(),
+            $this->documents(),
+            $this->repository()
+        ))->register();
+
+        (new Admin\InvoiceListPage($this->repository(), $this->documents()))->register();
+
+        /**
+         * Fires once every e-invoice service is wired. Lets sibling extensions
+         * decorate the pipeline (add a renderer, wrap issuance, add a profile)
+         * without subclassing our classes.
+         *
+         * @param EInvoiceExtension $extension
+         */
+        do_action('jankx/einvoice/ready', $this);
+    }
+
+    /**
+     * The framework calls this on activation. Order matters: parent first (it
+     * registers hooks and flips is_active), then schema.
+     */
+    public function activate(): bool
+    {
+        $result = parent::activate();
+
+        if (self::dependenciesMet()) {
+            $installer = new Model\InvoiceDatabaseInstaller();
+
+            // Force a re-check even if the version option is current, so an
+            // activation after a code deploy picks up pending migrations.
+            delete_option(Model\InvoiceDatabaseInstaller::VERSION_OPTION);
+            $installer->maybeCreateTables();
+
+            $this->seedDefaults();
+        }
+
+        return $result;
+    }
+
+    public function deactivate(): bool
+    {
+        // Deliberately keeps invoices and the counter table: they are accounting
+        // records. Resetting numbering here would let a reactivation reuse
+        // numbers that were already issued and filed.
+        return parent::deactivate();
+    }
+
+    public function get_dependencies(): array
+    {
+        return ['Jankx\\Extensions\\Ecommerce\\Order\\Order'];
     }
 
     // ── Services ─────────────────────────────────────────────────────────────
 
-    public function profiles(): InvoiceProfileRegistry
+    public function profiles(): Profile\InvoiceProfileRegistry
     {
-        if ($this->profiles === null) {
-            $this->profiles = new InvoiceProfileRegistry([
-                'VN' => static function (): VietnamInvoiceProfile {
-                    return new VietnamInvoiceProfile();
-                },
-            ], static function (): GenericInvoiceProfile {
-                return new GenericInvoiceProfile();
-            });
-        }
-
-        return $this->profiles;
+        return Profile\InvoiceProfileRegistry::get_instance();
     }
 
-    public function repository(): InvoiceRepositoryInterface
+    public function repository(): Repository\InvoiceRepositoryInterface
     {
-        if ($this->repository === null) {
-            $this->repository = new WordPressInvoiceRepository();
+        static $repository;
+
+        if ($repository === null) {
+            $repository = new Repository\WordPressInvoiceRepository();
         }
 
-        return $this->repository;
+        return $repository;
     }
 
-    public function documents(): \Jankx\Extensions\EInvoice\Service\InvoiceDocumentService
+    public function documents(): Service\InvoiceDocumentService
     {
-        if ($this->documents === null) {
-            $this->documents = new \Jankx\Extensions\EInvoice\Service\InvoiceDocumentService(
-                new \Jankx\Extensions\EInvoice\Render\InvoiceTemplateLoader($this->profiles()),
-                $this->buildRenderers()
-            );
-        }
+        static $documents;
 
-        return $this->documents;
-    }
-
-    public function issuance(): \Jankx\Extensions\EInvoice\Service\InvoiceIssuanceService
-    {
-        if ($this->issuance === null) {
-            $factory = new OrderSnapshotFactory(
-                new SellerIdentityResolver($this->profiles()),
-                new BuyerIdentityResolver(),
-                $this->numbering()
-            );
-
-            $this->issuance = new \Jankx\Extensions\EInvoice\Service\InvoiceIssuanceService(
-                $this->repository(),
-                $factory,
-                $this->documents()
-            );
-        }
-
-        return $this->issuance;
-    }
-
-    public function mailer(): \Jankx\Extensions\EInvoice\Mail\InvoiceMailer
-    {
-        if ($this->mailer === null) {
-            $this->mailer = new \Jankx\Extensions\EInvoice\Mail\InvoiceMailer(
-                $this->documents(),
+        if ($documents === null) {
+            $documents = new Service\InvoiceDocumentService(
+                new Render\InvoiceTemplateLoader($this->profiles()),
+                $this->renderers(),
                 $this->repository()
             );
         }
 
-        return $this->mailer;
+        return $documents;
     }
 
-    public function numbering(): YearlySequenceNumberGenerator
+    public function issuance(): Service\InvoiceIssuanceService
     {
-        return new YearlySequenceNumberGenerator();
-    }
+        static $issuance;
 
-    /**
-     * Published so sibling extensions (and themes) can decorate the invoice
-     * pipeline without subclassing our classes.
-     */
-    public function exposeServices(array $services = []): array
-    {
-        return array_merge($services, [
-            'profiles'    => $this->profiles(),
-            'repository'  => $this->repository(),
-            'documents'   => $this->documents(),
-            'issuance'    => $this->issuance(),
-            'mailer'      => $this->mailer(),
-            'numbering'   => $this->numbering(),
-        ]);
-    }
-
-    /**
-     * @return InvoiceRendererInterface[]
-     */
-    protected function buildRenderers(): array
-    {
-        $renderers = [
-            new \Jankx\Extensions\EInvoice\Render\HtmlInvoiceRenderer(),
-        ];
-
-        if (class_exists('Dompdf\\Dompdf')) {
-            $renderers[] = new \Jankx\Extensions\EInvoice\Render\DompdfPdfRenderer();
+        if ($issuance === null) {
+            $issuance = new Service\InvoiceIssuanceService(
+                $this->repository(),
+                new Snapshot\OrderSnapshotFactory(
+                    new Snapshot\SellerIdentityResolver(),
+                    new Snapshot\BuyerIdentityResolver()
+                ),
+                $this->profiles()
+            );
         }
+
+        return $issuance;
+    }
+
+    public function mailer(): Mail\InvoiceMailer
+    {
+        static $mailer;
+
+        if ($mailer === null) {
+            $mailer = new Mail\InvoiceMailer($this->documents(), $this->repository());
+        }
+
+        return $mailer;
+    }
+
+    /**
+     * @return Render\InvoiceRendererInterface[]
+     */
+    public function renderers(): array
+    {
+        $loader   = new Render\InvoiceTemplateLoader($this->profiles());
+        $renderers = [];
+
+        // PDF is only offered when Dompdf is actually installed, so the settings
+        // screen never presents a choice that would fail at render time.
+        if (class_exists('Dompdf\\Dompdf')) {
+            $renderers['dompdf'] = new Render\DompdfPdfRenderer($loader);
+        }
+
+        // HTML is always available and is the default.
+        $renderers['html'] = new Render\HtmlInvoiceRenderer($loader);
 
         /**
-         * Filter the available document renderers.
+         * Filter the available invoice document renderers, keyed by renderer id.
          *
-         * @param InvoiceRendererInterface[] $renderers
+         * @param Render\InvoiceRendererInterface[] $renderers
          */
-        return apply_filters('jankx/einvoice/renderers', $renderers);
+        return (array) apply_filters('jankx/einvoice/renderers', $renderers);
     }
 
-    // ── Hook registration ────────────────────────────────────────────────────
-
-    public function registerHooks(): void
-    {
-        (new \Jankx\Extensions\EInvoice\Listener\InvoiceOnOrderStatusListener(
-            $this->issuance(),
-            $this->mailer()
-        ))->register();
-
-        (new \Jankx\Extensions\EInvoice\Account\InvoiceAccountPanel(
-            $this->documents()
-        ))->register();
-
-        (new \Jankx\Extensions\EInvoice\Rest\InvoiceRestController(
-            $this->repository(),
-            $this->documents()
-        ))->register();
-
-        if (is_admin()) {
-            (new InvoiceSettingsPage(
-                $this->profiles(),
-                $this->documents(),
-                $this->repository()
-            ))->register();
-
-            (new InvoiceListPage($this->repository(), $this->documents()))->register();
-        }
-    }
+    // ── Hook callbacks ───────────────────────────────────────────────────────
 
     public function loadTextdomain(): void
     {
-        load_plugin_textdomain(
-            'e-invoice',
-            false,
-            dirname(plugin_basename($this->pluginFile())) . '/languages'
-        );
+        $path = $this->get_extension_path();
+
+        if ($path !== '') {
+            load_plugin_textdomain('e-invoice', false, basename($path) . '/languages');
+        }
     }
 
-    /**
-     * @return bool
-     */
-    public function reportActive($active)
+    public function flushProfiles(): void
     {
-        return (bool) $active;
+        Profile\InvoiceProfileRegistry::reset();
     }
 
-    // ── Activation ───────────────────────────────────────────────────────────
-
-    public function activate(): void
+    public function renderDependencyNotice(): void
     {
-        delete_option(InvoiceDatabaseInstaller::VERSION_OPTION_KEY);
-        (new InvoiceDatabaseInstaller())->maybeCreateTables();
-
-        if (!get_option(InvoiceSettingsPage::OPT_ENABLED)) {
-            add_option(InvoiceSettingsPage::OPT_ENABLED, '1');
-            add_option(InvoiceSettingsPage::OPT_EMAIL, '1');
-            add_option(InvoiceSettingsPage::OPT_SERIES, 'HD');
-            add_option(InvoiceSettingsPage::OPT_FORM_SYMBOL, '01');
+        if (!current_user_can('activate_plugins')) {
+            return;
         }
 
-        flush_rewrite_rules();
+        echo '<div class="notice notice-error"><p>'
+            . esc_html__(
+                'E-Invoice cần extension Ecommerce (base-ecommerce) được kích hoạt để hoạt động.',
+                'e-invoice'
+            )
+            . '</p></div>';
     }
 
-    public function deactivate(): void
+    // ── Internals ────────────────────────────────────────────────────────────
+
+    protected static function dependenciesMet(): bool
     {
-        wp_clear_scheduled_hook('jankx_einvoice_daily_maintenance');
-        flush_rewrite_rules();
+        foreach (['Jankx\\Extensions\\Ecommerce\\Order\\Order'] as $class) {
+            if (!class_exists($class)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /**
-     * Absolute path to the extension's plugin file, used for textdomain paths.
+     * First-run defaults. Only seeds when nothing is configured, so it can never
+     * overwrite a merchant's settings.
      */
-    protected function pluginFile(): string
+    protected function seedDefaults(): void
     {
-        return E_INVOICE_FILE;
+        $defaults = [
+            Admin\InvoiceSettingsPage::OPT_ENABLED     => '1',
+            Admin\InvoiceSettingsPage::OPT_EMAIL       => '1',
+            Admin\InvoiceSettingsPage::OPT_SERIES      => 'HD',
+            Admin\InvoiceSettingsPage::OPT_FORM_SYMBOL => '01',
+        ];
+
+        foreach ($defaults as $option => $value) {
+            if (get_option($option) === false) {
+                add_option($option, $value);
+            }
+        }
     }
 }

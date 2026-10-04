@@ -26,7 +26,7 @@ class InvoiceDatabaseInstaller
      */
     protected const DB_VERSION = '1.0.0';
 
-    protected const VERSION_OPTION = 'jankx_einvoice_db_version';
+    public const VERSION_OPTION = 'jankx_einvoice_db_version';
 
     public function register(): void
     {

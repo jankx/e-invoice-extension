@@ -127,6 +127,17 @@ class InvoiceRestController
         $response = new WP_REST_Response($rendered['content']);
         $response->header('Content-Type', $rendered['renderer']->getContentType());
 
+        // Explicitly inline: the account panel and the admin preview both embed
+        // this URL in an <iframe>, and without the disposition some browser PDF
+        // handlers force a download instead of rendering in place.
+        $response->header(
+            'Content-Disposition',
+            sprintf(
+                'inline; filename="%s"',
+                sanitize_file_name($this->documents->filename($invoice, $rendered['renderer']))
+            )
+        );
+
         return $response;
     }
 

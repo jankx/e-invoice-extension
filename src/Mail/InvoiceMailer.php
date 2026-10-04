@@ -46,6 +46,10 @@ class InvoiceMailer
      */
     public function send(Invoice $invoice, $order = null): bool
     {
+        if (!get_option('jankx_einvoice_email_enabled', true)) {
+            return false;
+        }
+
         $to = $this->recipient($invoice, $order);
         if ($to === '') {
             $this->log('no recipient email for invoice ' . $invoice->getInvoiceNumber());
@@ -71,9 +75,24 @@ class InvoiceMailer
             }
         }
 
-        $html = $renderer->isBinary()
-            ? $this->buildHtml($invoice, $order, $content)
-            : $content;
+        // The body is always HTML. When the configured renderer produced a PDF,
+        // the HTML copy is rendered separately — the PDF bytes must never be
+        // spliced into a text/html part.
+        if ($renderer->isBinary()) {
+            $body = $this->documents->renderHtml($invoice);
+            if ($body === null) {
+                // Without an HTML body there is still a deliverable attachment.
+                $this->log('invoice ' . $invoice->getInvoiceNumber()
+                    . ' has a PDF but no HTML body; sending attachment only');
+                $body = '';
+            }
+        } else {
+            $body = $content;
+        }
+
+        $html = $body === ''
+            ? $this->buildHtml($invoice, $order, '')
+            : ($renderer->isBinary() ? $this->buildHtml($invoice, $order, $body) : $body);
 
         $subject = $this->subject($invoice);
 

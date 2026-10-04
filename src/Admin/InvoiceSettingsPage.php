@@ -41,6 +41,7 @@ class InvoiceSettingsPage
     const OPT_SELLER_PHONE    = 'jankx_einvoice_seller_phone';
     const OPT_SELLER_EMAIL    = 'jankx_einvoice_seller_email';
     const OPT_SELLER_LOCATION = 'jankx_einvoice_seller_location';
+    const OPT_SELLER_ID       = 'jankx_einvoice_seller_personal_id';
     const OPT_BANK_NAME       = 'jankx_einvoice_seller_bank_name';
     const OPT_BANK_ACCOUNT    = 'jankx_einvoice_seller_bank_account';
 
@@ -112,6 +113,7 @@ class InvoiceSettingsPage
             self::OPT_SELLER_PHONE,
             self::OPT_SELLER_EMAIL,
             self::OPT_SELLER_LOCATION,
+            self::OPT_SELLER_ID,
             self::OPT_BANK_NAME,
             self::OPT_BANK_ACCOUNT,
         ] as $option) {
@@ -287,6 +289,7 @@ class InvoiceSettingsPage
                     self::OPT_SELLER_PHONE    => __('Điện thoại', 'e-invoice'),
                     self::OPT_SELLER_EMAIL    => __('Email', 'e-invoice'),
                     self::OPT_SELLER_LOCATION => __('Mã, địa chỉ địa điểm kinh doanh', 'e-invoice'),
+                    self::OPT_SELLER_ID       => __('Mã số định danh cá nhân', 'e-invoice'),
                     self::OPT_BANK_NAME       => __('Ngân hàng', 'e-invoice'),
                     self::OPT_BANK_ACCOUNT    => __('Số tài khoản', 'e-invoice'),
                 ];

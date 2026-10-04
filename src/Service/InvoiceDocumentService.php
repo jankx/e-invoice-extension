@@ -6,6 +6,7 @@ use Jankx\Extensions\EInvoice\Model\Invoice;
 use Jankx\Extensions\EInvoice\Render\DompdfPdfRenderer;
 use Jankx\Extensions\EInvoice\Render\HtmlInvoiceRenderer;
 use Jankx\Extensions\EInvoice\Render\InvoiceTemplateLoader;
+use Jankx\Extensions\EInvoice\Repository\InvoiceRepositoryInterface;
 
 /**
  * Produces the invoice document in whichever format the shop has configured.
@@ -30,13 +31,20 @@ class InvoiceDocumentService
     /** @var InvoiceRendererInterface[] */
     protected $renderers;
 
-    public function __construct(InvoiceTemplateLoader $loader, array $renderers = [])
-    {
+    /** @var InvoiceRepositoryInterface|null Persists the generated file path. */
+    protected $repository;
+
+    public function __construct(
+        InvoiceTemplateLoader $loader,
+        array $renderers = [],
+        ?InvoiceRepositoryInterface $repository = null
+    ) {
         $this->loader    = $loader;
         $this->renderers = $renderers ?: [
             'html'   => new HtmlInvoiceRenderer($loader),
             'dompdf' => new DompdfPdfRenderer($loader),
         ];
+        $this->repository = $repository;
     }
 
     /**
@@ -120,6 +128,28 @@ class InvoiceDocumentService
     }
 
     /**
+     * Render the invoice as HTML regardless of the configured renderer.
+     *
+     * Email bodies must be HTML: passing PDF bytes to wp_mail() as a text/html
+     * part produces a message that is unreadable in every client, so the HTML
+     * copy is rendered separately from whatever is attached.
+     *
+     * @return string|null Null only if HTML rendering is impossible.
+     */
+    public function renderHtml(Invoice $invoice): ?string
+    {
+        $renderer = $this->renderers['html'] ?? new HtmlInvoiceRenderer($this->loader);
+
+        try {
+            return $renderer->render($invoice);
+        } catch (\Throwable $e) {
+            $this->log('html render failed: ' . $e->getMessage());
+
+            return null;
+        }
+    }
+
+    /**
      * Render and cache the document, returning its absolute path on disk.
      *
      * Returns null for non-binary renderers, since HTML is served directly
@@ -158,6 +188,13 @@ class InvoiceDocumentService
         }
 
         $invoice->setPdfPath($path);
+
+        // Persist it: the filename is deterministic, so a missing row would still
+        // resolve on the next request, but the column is the audit trail of
+        // which document was actually generated for this invoice.
+        if ($this->repository && $invoice->getId() > 0) {
+            $this->repository->update($invoice);
+        }
 
         return $path;
     }
