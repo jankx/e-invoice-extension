@@ -42,7 +42,7 @@ class InvoiceListPage
         add_menu_page(
             __('Hóa đơn điện tử', 'e-invoice'),
             __('Hóa đơn', 'e-invoice'),
-            'read',
+            'manage_woocommerce',
             self::PAGE_SLUG,
             [$this, 'render'],
             'dashicons-media-spreadsheet',
@@ -52,7 +52,10 @@ class InvoiceListPage
 
     public function render(): void
     {
-        if (!current_user_can('read')) {
+        // The invoice table holds customer names, emails, addresses and seller
+        // tax codes. It is a staff screen, so it must not be reachable by any
+        // role that merely has 'read' (every Subscriber/customer account has it).
+        if (!current_user_can('manage_woocommerce')) {
             wp_die(esc_html__('You do not have permission to view invoices.', 'e-invoice'));
         }
 

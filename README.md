@@ -70,6 +70,10 @@ không bao giờ ghi đè cài đặt của bạn.
 
 Danh sách hóa đơn: menu *Hóa đơn* trong trong quản trị.
 
+> **Hướng dẫn thao tác:** xem [`docs/TAO-HOA-DON.md`](docs/TAO-HOA-DON.md) — ba cách tạo
+> hóa đơn (tự động, thủ công cho một đơn, cấp hàng loạt cho đơn cũ) và cách xử lý khi đơn
+> không có hóa đơn.
+
 ## Thời điểm phát hành
 
 | Trigger | Bắn khi |
@@ -85,6 +89,22 @@ Phát hành là **idempotent**: mỗi đơn chỉ nhận một hóa đơn (ràng
 `OrderAdmin` cập nhật status trực tiếp qua `OrderModel::update()`, **bỏ qua** hook
 `order/status_changed`. Vì vậy extension cũng lắng nghe `admin_init` trên màn hình đơn hàng
 để đối soát lại sau khi redirect, thay vì tin vào hook.
+
+### Cấp hóa đơn thủ công
+
+Phát hành tự động chỉ phản ứng với **chuyển trạng thái**. Đơn đã hoàn thành *trước khi* extension
+được cài sẽ không bao giờ bắn event nào, nên không có cách nào tự sinh hóa đơn cho nó. Vì vậy
+extension cung cấp hai đường thủ công:
+
+- **Một đơn** — nút *Cấp hóa đơn cho đơn này* ở cuối màn hình chi tiết đơn hàng
+  (`Admin/InvoiceOrderAction`, render bởi `Admin/InvoiceOrderPanel` qua extension point
+  `jankx/ecommerce/order_detail/after_content`).
+- **Hàng loạt** — menu *Hóa đơn → Cấp hóa đơn cũ* (`Admin/InvoiceBackfillPage`) liệt kê các
+  đơn đã đạt ngưỡng phát hành nhưng chưa có hóa đơn.
+
+Cả hai đều qua `InvoiceIssuanceService::issue()`, nên vẫn giữ idempotency và validation gate.
+Cố ý **không** có nút "cấp tất cả": cấp hóa đơn tiêu tốn một số trong dãy và có thể gửi email,
+nên người dùng phải chọn từng đơn.
 
 ## Hóa đơn là bản chụp bất biến
 
@@ -209,6 +229,8 @@ e-invoice/
 ├── views/
 │   ├── vn.php                      # Bố cục Việt Nam
 │   └── generic.php                 # Bố cục chung
+├── docs/
+│   └── TAO-HOA-DON.md              # Hướng dẫn thao tác cho người quản trị
 └── src/
     ├── Contracts/                  # Interface
     ├── Model/                      # Invoice, dòng, bên, tổng, schema
@@ -218,7 +240,8 @@ e-invoice/
     ├── Snapshot/                   # Chụp dữ liệu tại thời điểm phát hành
     ├── Service/                    # Phát hành, dựng tài liệu
     ├── Render/                     # HTML, Dompdf, template loader
-    ├── Mail/ Account/ Rest/ Admin/ Listener/
+    ├── Mail/ Account/ Rest/ Listener/
+    ├── Admin/                      # Danh sách, cài đặt, cấp hóa đơn thủ công
     └── Support/                    # Tiền tệ, làm tròn, số tiền bằng chữ
 ```
 

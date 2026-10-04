@@ -184,9 +184,8 @@ class InvoiceIssuanceService
     }
 
     /**
-     * Guard against infinite recursion: the order-detail panel and the mailer
-     * both read orders, and anything that writes to the order could re-trigger
-     * issuance.
+     * Diagnostics only. Issuance problems are never surfaced to the customer:
+     * a missing invoice is recoverable by hand, a broken checkout is not.
      */
     protected function log(string $message): void
     {

@@ -106,6 +106,14 @@ class EInvoiceExtension extends AbstractExtension
 
         (new Admin\InvoiceListPage($this->repository(), $this->documents()))->register();
 
+        // Manual issuance. Automatic issuance only reacts to status transitions,
+        // so orders completed before the extension was installed can never get an
+        // invoice on their own — this gives the shopkeeper a deliberate way to
+        // issue one, individually or in bulk.
+        (new Admin\InvoiceOrderAction($this->issuance()))->register();
+        (new Admin\InvoiceOrderPanel($this->repository()))->register();
+        (new Admin\InvoiceBackfillPage($this->issuance(), $this->repository()))->register();
+
         /**
          * Fires once every e-invoice service is wired. Lets sibling extensions
          * decorate the pipeline (add a renderer, wrap issuance, add a profile)
